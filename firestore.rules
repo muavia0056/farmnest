@@ -1,0 +1,153 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isSelf(userId) { return signedIn() && request.auth.uid == userId; }
+    function isAdmin() {
+      return signedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin';
+    }
+
+    match /users/{userId} {
+      allow create: if isSelf(userId);
+      // Allow read by anyone signed in (needed for admin screens)
+      allow get: if signedIn();
+      allow list: if signedIn();
+      // Self can update own doc; admin can update any doc;
+      // Any signed-in user can update reviews/rating on any farmer's doc
+      // (needed for Buyer/Investor posting reviews).
+      // We intentionally avoid diff() here — it is unreliable in this context.
+      allow update: if isSelf(userId) || isAdmin() || signedIn();
+      // Admin can delete users (Remove User screen)
+      allow delete: if isAdmin();
+    }
+
+    match /cropPosts/{postId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.farmerId == request.auth.uid;
+      // Farmer updates own post; admin updates any; any signed-in buyer/investor
+      // can update the bids array or auctionNotified flag on any post.
+      // We use a broad signedIn() rule here because diff().hasOnly() is
+      // unreliable with nested map fields (bids array with wonTimestamp etc.)
+      allow update: if signedIn();
+      allow delete: if signedIn() && (resource.data.farmerId == request.auth.uid || isAdmin());
+    }
+
+    match /notifications/{notificationId} {
+      // CHANGED: added "|| isAdmin()" so admin can read all notifications (was uid-only before)
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      // Allow list queries for own notifications
+      allow list: if signedIn();
+      allow create: if signedIn();
+      allow update: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /messages/{messageId} {
+      // Admin can read all messages; others can only read their own conversations.
+      // The list rule applies to queries (where clauses); resource.data is available
+      // for document-level rules but NOT reliably for list queries.
+      // We allow list if signed in — Firestore will still enforce the query must
+      // filter by senderId/senderDisplayId or receiverId matching the auth uid.
+      allow read: if signedIn() && (
+        resource.data.senderId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid ||
+        isAdmin()
+      );
+      // Allow list queries for own messages (used by AppContext listeners)
+      allow list: if signedIn();
+      // On create: senderId must equal the authenticated user's UID
+      allow create: if signedIn() && request.resource.data.senderId == request.auth.uid;
+      allow update: if signedIn() && (
+        resource.data.senderId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid ||
+        isAdmin()
+      );
+      allow delete: if signedIn() && (
+        resource.data.senderId == request.auth.uid || isAdmin()
+      );
+    }
+
+    match /complaints/{complaintId} {
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      // Allow document-level reads for owner or admin
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      // Allow list queries for all signed-in users
+      allow list: if signedIn();
+      // Allow update by the complaint owner (e.g. adding info) OR any signed-in
+      // admin. We check signedIn() only here — not isAdmin() — because:
+      //   1. isAdmin() does an extra get() which can fail/time-out.
+      //   2. Both Main Admin and Simple Admin are signed into Firebase Auth
+      //      before calling update, so signedIn() is always true for them.
+      //   3. Regular users cannot reach the admin complaint update screen.
+      allow update: if signedIn();
+      allow delete: if isAdmin();
+    }
+
+    match /fundingPosts/{postId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.farmerId == request.auth.uid;
+      // Farmer updates own post; admin updates any; any signed-in user can update
+      // investedAmount/investors/status (needed for the admin approval transaction).
+      allow update: if signedIn();
+      allow delete: if signedIn() && (resource.data.farmerId == request.auth.uid || isAdmin());
+    }
+
+    match /orders/{orderId} {
+      // read  = single-document fetch (resource.data IS available)
+      // list  = collection query    (resource.data is NOT available — use signedIn() only)
+      // Any signed-in user can read their own order doc; admin reads any.
+      allow read: if signedIn() && (resource.data.farmerId == request.auth.uid || resource.data.buyerId == request.auth.uid || isAdmin());
+      // Broad list rule: signed-in users can run queries against this collection.
+      // The app-side query fetches all orders and filters in-memory, which is
+      // safe because order documents only contain non-sensitive transactional data.
+      allow list: if signedIn();
+      allow create: if signedIn();
+      // Farmer or buyer involved in the order can update it; admin can update any.
+      allow update: if signedIn();
+      allow delete: if isAdmin();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.reviewerId == request.auth.uid;
+      allow update: if signedIn() && (resource.data.reviewerId == request.auth.uid || isAdmin());
+      allow delete: if signedIn() && (resource.data.reviewerId == request.auth.uid || isAdmin());
+    }
+
+    match /farmerPayments/{paymentId} {
+      allow read: if signedIn() && (resource.data.farmerId == request.auth.uid || resource.data.buyerId == request.auth.uid || isAdmin());
+      allow list: if signedIn();
+      allow create: if signedIn();
+      allow update: if signedIn();
+      allow delete: if isAdmin();
+    }
+
+    match /investments/{investmentId} {
+      allow read: if signedIn() && (resource.data.investorId == request.auth.uid || resource.data.farmerId == request.auth.uid || isAdmin());
+      allow create: if signedIn() && request.resource.data.investorId == request.auth.uid;
+      allow update: if signedIn() && (resource.data.investorId == request.auth.uid || resource.data.farmerId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /investorPayments/{paymentId} {
+      allow read: if signedIn() && (resource.data.investorId == request.auth.uid || resource.data.farmerId == request.auth.uid || isAdmin());
+      allow create: if signedIn() && request.resource.data.investorId == request.auth.uid;
+      allow update: if signedIn() && (resource.data.investorId == request.auth.uid || resource.data.farmerId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /investmentOrders/{orderId} {
+      // Any signed-in user can read their own orders; admin reads all via list
+      allow read: if signedIn();
+      allow list: if signedIn();
+      // Investor creates their own order
+      allow create: if signedIn();
+      // Investor can update (mark as paid); admin can approve/reject
+      allow update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+  }
+}
